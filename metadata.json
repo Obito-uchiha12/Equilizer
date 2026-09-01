@@ -1,0 +1,6 @@
+{
+  "name": "Equalizer",
+  "description": "Android Audio Equalizer & Sound Enhancement Architecture for Earphones and Audio Devices",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

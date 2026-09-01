@@ -1,0 +1,115 @@
+name: Build and Publish Production Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag Name (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Restore Keystore from Secrets (If Available)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Decoding release signing keystore..."
+            echo "$KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+            echo "KEYSTORE_FILE=release.keystore" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+            echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+          else
+            echo "No external release keystore secret configured; continuing build."
+          fi
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Locate and Verify Release APK
+        id: locate_apk
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" -type f | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: Release APK not found in app/build/outputs/apk/release!"
+            exit 1
+          fi
+          echo "Found APK at: $APK_PATH"
+          
+          # Standardize release APK artifact name
+          RELEASE_APK="Equalizer-1.0.apk"
+          cp "$APK_PATH" "$RELEASE_APK"
+          
+          # Generate SHA-256 Checksum
+          SHA256=$(sha256sum "$RELEASE_APK" | awk '{print $1}')
+          echo "APK_PATH=$RELEASE_APK" >> $GITHUB_OUTPUT
+          echo "SHA256=$SHA256" >> $GITHUB_OUTPUT
+          echo "APK SHA-256: $SHA256"
+
+      - name: Secure Cleanup of Temporary Signing Files
+        if: always()
+        run: |
+          if [ -f "app/release.keystore" ]; then
+            shred -u app/release.keystore || rm -f app/release.keystore
+          fi
+
+      - name: Create GitHub Release and Upload APK
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          name: Equalizer ${{ github.ref_name || github.event.inputs.tag_name }}
+          tag_name: ${{ github.ref_name || github.event.inputs.tag_name }}
+          draft: false
+          prerelease: false
+          files: Equalizer-1.0.apk
+          body: |
+            ## Equalizer Production Release (v1.0.0)
+            
+            A high-precision, privacy-focused audio equalizer application for Android.
+
+            ### 🎧 Highlights
+            * **Real 5-Band Equalizer**: Native Android AudioEffect processing with bi-quadratic peaking filters (60 Hz, 230 Hz, 910 Hz, 3.6 kHz, 14 kHz).
+            * **Headroom & Clipping Protection**: Automatic dynamic pre-gain attenuation and manual headroom modes.
+            * **Smart EQ Assistant**: Goal-oriented sound tailoring based on listening preferences and device acoustic profiles.
+            * **Per-Device Audio Routing**: Automatic profile persistence for Bluetooth headphones, wired earphones, USB audio, and phone speakers.
+            * **Instant A/B Mode & Calibration Tones**: Instant flat comparison and diagnostic sine/pink noise/sweep generator.
+            * **100% Offline & Private**: Zero internet, zero microphone, and zero telemetry permissions.
+
+            ### 📋 Package & Verification
+            * **Application ID**: `com.aistudio.equalizer.fxarch`
+            * **Version**: `1.0` (Version Code `1`)
+            * **Target SDK**: `36` (Android 16) | **Min SDK**: `24` (Android 7.0+)
+            * **File**: `Equalizer-1.0.apk`
+            * **SHA-256 Checksum**: `${{ steps.locate_apk.outputs.SHA256 }}`
+
+            ### ⚠️ Known Platform Notes
+            * Actual hardware effect support is managed by the device's audio HAL. OEM systems (e.g. Samsung SoundAlive, Xiaomi Dirac) may enforce device-specific audio routing policies.
