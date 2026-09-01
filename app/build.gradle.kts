@@ -25,17 +25,25 @@ android {
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val envPath = System.getenv("KEYSTORE_PATH") 
+        ?: System.getenv("KEYSTORE_FILE")
+        ?: "${projectDir}/release.keystore"
+      val candidateFile = if (File(envPath).isAbsolute) File(envPath) else file(envPath)
+      if (candidateFile.exists()) {
+        storeFile = candidateFile
+        storePassword = System.getenv("STORE_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+        keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      val debugFile = file("${rootDir}/debug.keystore")
+      if (debugFile.exists()) {
+        storeFile = debugFile
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
   }
 
@@ -44,9 +52,17 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      val releaseConfig = signingConfigs.getByName("release")
+      if (releaseConfig.storeFile?.exists() == true) {
+        signingConfig = releaseConfig
+      }
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      val debugConfig = signingConfigs.getByName("debugConfig")
+      if (debugConfig.storeFile?.exists() == true) {
+        signingConfig = debugConfig
+      }
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
