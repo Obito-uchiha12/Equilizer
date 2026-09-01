@@ -44,7 +44,25 @@ Audio effect processing on Android relies on the underlying device HAL and manuf
 
 ---
 
-## 🛠️ Building & Releasing
+## 🚀 CI / CD Pipeline
+
+The repository uses automated GitHub Actions workflows for continuous integration and production releases:
+
+### 🛠️ Development (Continuous Integration)
+* **Trigger**: Push or Pull Request to `main`, or manual `workflow_dispatch`.
+* **Action**: Automatically tests (`testDebugUnitTest`), compiles, and builds `Equilizer-debug.apk`.
+* **Artifact**: Uploads the debug APK as a GitHub Actions workflow artifact (`Equilizer-CI-APK`).
+
+### 📦 Production Release
+* **Trigger**: Push a version tag matching `v*` (e.g. `git tag v1.0.0 && git push origin v1.0.0`), or manual `workflow_dispatch`.
+* **Action**: Runs tests, builds the production release APK, dynamically verifies the artifact, computes SHA-256 checksums, and creates a GitHub Release.
+* **Release Assets**:
+  * `Equilizer-vX.Y.Z.apk` (Signed release binary)
+  * `Equilizer-vX.Y.Z.apk.sha256` (Integrity checksum)
+
+---
+
+## 🛠️ Building & Releasing Locally
 
 ### Prerequisites
 * JDK 17+

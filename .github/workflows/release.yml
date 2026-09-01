@@ -1,4 +1,4 @@
-name: Build and Publish Production Release APK
+name: Build and Publish Production Release
 
 on:
   push:
@@ -11,12 +11,16 @@ on:
         required: true
         default: 'v1.0.0'
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
   build-release:
-    name: Build & Release APK
+    name: Build & Release Production APK
     runs-on: ubuntu-latest
 
     steps:
@@ -32,9 +36,20 @@ jobs:
           java-version: '17'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: Restore Keystore from Secrets (If Available)
+      - name: Verify Environment & Wrapper Diagnostics
+        run: |
+          echo "=== Release Environment Diagnostics ==="
+          echo "Current Working Directory: $(pwd)"
+          echo "Git Ref: ${{ github.ref }}"
+          echo "Git Ref Name: ${{ github.ref_name }}"
+          ls -la
+          chmod +x ./gradlew
+          test -f ./gradlew
+          ./gradlew --version
+
+      - name: Restore Keystore from Secrets (If Configured)
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -49,31 +64,47 @@ jobs:
             echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
             echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
           else
-            echo "No external release keystore secret configured; continuing build."
+            echo "No external release keystore secret configured; continuing with standard release build."
           fi
+
+      - name: Run Unit Tests
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Locate and Verify Release APK
-        id: locate_apk
+      - name: Locate, Verify, and Package Release Artifacts
+        id: package_release
         run: |
+          TAG="${{ github.ref_name }}"
+          if [ -z "$TAG" ] || [ "$TAG" = "main" ]; then
+            TAG="${{ github.event.inputs.tag_name || 'v1.0.0' }}"
+          fi
+          echo "Target Release Tag: $TAG"
+          
           APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" -type f | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "Error: Release APK not found in app/build/outputs/apk/release!"
+            APK_PATH=$(find . -path "*/build/outputs/apk/*" -name "*release*.apk" -type f | head -n 1)
+          fi
+          if [ -z "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
+            echo "Error: Release APK not found or empty!"
             exit 1
           fi
-          echo "Found APK at: $APK_PATH"
+          echo "Found generated Release APK at: $APK_PATH"
+          ls -lh "$APK_PATH"
           
-          # Standardize release APK artifact name
-          RELEASE_APK="Equalizer-1.0.apk"
+          RELEASE_APK="Equilizer-${TAG}.apk"
           cp "$APK_PATH" "$RELEASE_APK"
           
-          # Generate SHA-256 Checksum
-          SHA256=$(sha256sum "$RELEASE_APK" | awk '{print $1}')
-          echo "APK_PATH=$RELEASE_APK" >> $GITHUB_OUTPUT
-          echo "SHA256=$SHA256" >> $GITHUB_OUTPUT
-          echo "APK SHA-256: $SHA256"
+          # Generate SHA-256 Checksum file
+          sha256sum "$RELEASE_APK" > "${RELEASE_APK}.sha256"
+          SHA256=$(awk '{print $1}' "${RELEASE_APK}.sha256")
+          
+          echo "RELEASE_APK=$RELEASE_APK" >> $GITHUB_ENV
+          echo "SHA256_FILE=${RELEASE_APK}.sha256" >> $GITHUB_ENV
+          echo "SHA256=$SHA256" >> $GITHUB_ENV
+          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
+          echo "Generated APK: $RELEASE_APK (SHA-256: $SHA256)"
 
       - name: Secure Cleanup of Temporary Signing Files
         if: always()
@@ -82,17 +113,19 @@ jobs:
             shred -u app/release.keystore || rm -f app/release.keystore
           fi
 
-      - name: Create GitHub Release and Upload APK
+      - name: Create GitHub Release and Upload Assets
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          name: Equalizer ${{ github.ref_name || github.event.inputs.tag_name }}
-          tag_name: ${{ github.ref_name || github.event.inputs.tag_name }}
+          name: Equilizer ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
           draft: false
           prerelease: false
-          files: Equalizer-1.0.apk
+          files: |
+            ${{ env.RELEASE_APK }}
+            ${{ env.SHA256_FILE }}
           body: |
-            ## Equalizer Production Release (v1.0.0)
+            ## Equilizer Production Release (${{ env.RELEASE_TAG }})
             
             A high-precision, privacy-focused audio equalizer application for Android.
 
@@ -106,10 +139,9 @@ jobs:
 
             ### 📋 Package & Verification
             * **Application ID**: `com.aistudio.equalizer.fxarch`
-            * **Version**: `1.0` (Version Code `1`)
             * **Target SDK**: `36` (Android 16) | **Min SDK**: `24` (Android 7.0+)
-            * **File**: `Equalizer-1.0.apk`
-            * **SHA-256 Checksum**: `${{ steps.locate_apk.outputs.SHA256 }}`
+            * **Release Binary**: `${{ env.RELEASE_APK }}`
+            * **SHA-256 Checksum**: `${{ env.SHA256 }}`
 
             ### ⚠️ Known Platform Notes
             * Actual hardware effect support is managed by the device's audio HAL. OEM systems (e.g. Samsung SoundAlive, Xiaomi Dirac) may enforce device-specific audio routing policies.

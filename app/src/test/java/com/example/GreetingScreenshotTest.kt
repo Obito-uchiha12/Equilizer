@@ -11,7 +11,6 @@ import com.example.settings.model.EqualizerSettings
 import com.example.settings.model.Preset
 import com.example.ui.HomeScreen
 import com.example.ui.HomeUiState
-import com.example.ui.components.AboutPrivacyDialog
 import com.example.ui.theme.EqualizerAppTheme
 import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
 import com.github.takahirom.roborazzi.captureRoboImage
@@ -24,17 +23,68 @@ import org.robolectric.annotation.GraphicsMode
 
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(qualifiers = RobolectricDeviceQualifiers.Pixel8, sdk = [36])
+@Config(qualifiers = RobolectricDeviceQualifiers.Pixel5, sdk = [34])
 class GreetingScreenshotTest {
 
     @get:Rule val composeTestRule = createComposeRule()
 
     @Test
-    fun greeting_screenshot() {
+    fun equalizer_home_screen_screenshot() {
+        val sampleUiState = HomeUiState(
+            isInitialized = true,
+            currentDevice = AudioDevice.defaultBuiltinSpeaker(),
+            availableDevices = listOf(AudioDevice.defaultBuiltinSpeaker()),
+            capabilities = AudioCapabilities(
+                overallState = AudioCapabilityState.PARTIALLY_SUPPORTED,
+                isSystemEqualizerAvailable = true,
+                isBassBoostAvailable = true,
+                isTrebleAvailable = true,
+                isVirtualizerAvailable = false,
+                isPreampGainAvailable = true,
+                supportedBands = EqualizerBand.default5Bands()
+            ),
+            settings = EqualizerSettings(isEnabled = true),
+            presets = Preset.defaultPresets(),
+            profiles = EarphoneProfile.defaultProfiles()
+        )
+
         composeTestRule.setContent {
             EqualizerAppTheme {
-                AboutPrivacyDialog(
-                    onDismiss = {}
+                HomeScreen(
+                    uiState = sampleUiState,
+                    onToggleEnabled = {},
+                    onBandGainChanged = { _, _ -> },
+                    onBassChanged = {},
+                    onTrebleChanged = {},
+                    onPreampChanged = {},
+                    onBalanceChanged = {},
+                    onSelectPreset = {},
+                    onSelectEarphoneProfile = {},
+                    onToggleAutoApplyProfile = {},
+                    onRefreshDevices = {},
+                    onSelectDevice = {},
+                    onPlayTestTone = {},
+                    onStopTestTone = {},
+                    onSetTestToneVolume = {},
+                    onResetDefaults = {},
+                    onDismissNotification = {},
+                    onDismissError = {},
+                    onOpenSettings = {},
+                    onCloseSettings = {},
+                    onOpenDiagnostics = {},
+                    onCloseDiagnostics = {},
+                    onResetToFlat = {},
+                    onShowSavePresetDialog = {},
+                    onDismissSavePresetDialog = {},
+                    onCreateCustomPreset = { _, _ -> },
+                    onShowRenamePresetDialog = {},
+                    onDismissRenamePresetDialog = {},
+                    onRenameCustomPreset = { _, _ -> },
+                    onUpdateCurrentCustomPreset = {},
+                    onShowDeletePresetDialog = {},
+                    onDismissDeletePresetDialog = {},
+                    onDeleteCustomPreset = {},
+                    onMapDeviceToPreset = { _, _ -> }
                 )
             }
         }
