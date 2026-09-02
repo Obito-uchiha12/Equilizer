@@ -78,7 +78,10 @@ android {
       isReturnDefaultValues = true
       all {
         it.maxHeapSize = "2048m"
-        it.forkEvery = 10
+        it.jvmArgs(
+          "--add-opens=java.base/java.lang=ALL-UNNAMED",
+          "--add-opens=java.base/java.util=ALL-UNNAMED"
+        )
       }
     }
   }

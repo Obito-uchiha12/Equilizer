@@ -27,6 +27,11 @@ class AudioSessionReceiver(
 
         AppLogger.i(LogCategory.AUDIO, TAG, "Received audio session broadcast: $action, sessionId=$sessionId, package=$packageName")
 
+        if (context != null && packageName != null && packageName == context.packageName) {
+            AppLogger.d(LogCategory.AUDIO, TAG, "Ignoring self-originated audio session broadcast for $packageName")
+            return
+        }
+
         when (action) {
             AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION -> {
                 val sessionInfo = AudioSessionInfo(
