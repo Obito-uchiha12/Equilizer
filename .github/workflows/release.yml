@@ -146,94 +146,152 @@ jobs:
             -name "*.apk" \
             -print
 
-      - name: Locate Verify and Package Release APK
+      - name: Locate, Validate, and Package Release APK
         id: package_release
         shell: bash
         run: |
           set -euo pipefail
 
-          RELEASE_DIR="app/build/outputs/apk/release"
+          SEARCH_DIR="app/build/outputs/apk"
 
-          if [ ! -d "$RELEASE_DIR" ]; then
-            echo "ERROR: $RELEASE_DIR does not exist."
+          if [ ! -d "$SEARCH_DIR" ]; then
+            echo "ERROR: Search directory '$SEARCH_DIR' does not exist."
             exit 1
           fi
 
-          mapfile -t APK_FILES < <(
-            find "$RELEASE_DIR" \
-              -maxdepth 2 \
-              -type f \
-              -name "*.apk" \
-              -print |
+          echo "Searching recursively for release APK candidates under $SEARCH_DIR..."
+
+          # Discover candidate APK files, explicitly rejecting debug, test, androidTest, benchmark
+          mapfile -t CANDIDATES < <(
+            find "$SEARCH_DIR" -type f -name "*.apk" \
+              ! -name "*debug*" \
+              ! -name "*test*" \
+              ! -name "*androidTest*" \
+              ! -name "*benchmark*" |
               sort
           )
 
-          if [ "${#APK_FILES[@]}" -eq 0 ]; then
-            echo "ERROR: No release APK was produced."
-            echo "Complete output tree:"
-            find app/build/outputs -maxdepth 6 -type f -print || true
+          echo "Discovered ${#CANDIDATES[@]} candidate APK file(s):"
+          printf ' - %s\n' "${CANDIDATES[@]}"
+
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+            echo "ERROR: No release APK candidates found in $SEARCH_DIR!"
+            echo "Available files in $SEARCH_DIR:"
+            find "$SEARCH_DIR" -type f -maxdepth 5 -print || true
             exit 1
           fi
 
-          echo "Found ${#APK_FILES[@]} APK file(s):"
-          printf '%s\n' "${APK_FILES[@]}"
-
+          # Deterministic selection:
+          # Priority 1: app-release.apk located directly under a release directory
+          # Priority 2: app-release-unsigned.apk located directly under a release directory
+          # Priority 3: any APK located under a release/ directory
+          # Priority 4: single candidate fallback
           PRIMARY_APK=""
 
-          for apk in "${APK_FILES[@]}"; do
-            filename="$(basename "$apk")"
-
-            if [ "$filename" = "app-release.apk" ]; then
+          for apk in "${CANDIDATES[@]}"; do
+            if [[ "$apk" =~ /release/app-release\.apk$ ]]; then
               PRIMARY_APK="$apk"
+              echo "Selected signed release APK: $PRIMARY_APK"
               break
             fi
           done
 
           if [ -z "$PRIMARY_APK" ]; then
-            PRIMARY_APK="${APK_FILES[0]}"
+            for apk in "${CANDIDATES[@]}"; do
+              if [[ "$apk" =~ /release/app-release-unsigned\.apk$ ]]; then
+                PRIMARY_APK="$apk"
+                echo "Selected unsigned release APK: $PRIMARY_APK"
+                break
+              fi
+            done
           fi
 
+          if [ -z "$PRIMARY_APK" ]; then
+            for apk in "${CANDIDATES[@]}"; do
+              if [[ "$apk" =~ /release/ ]]; then
+                PRIMARY_APK="$apk"
+                echo "Selected release APK in release directory: $PRIMARY_APK"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$PRIMARY_APK" ] && [ "${#CANDIDATES[@]}" -eq 1 ]; then
+            PRIMARY_APK="${CANDIDATES[0]}"
+            echo "Selected single discovered candidate: $PRIMARY_APK"
+          fi
+
+          if [ -z "$PRIMARY_APK" ]; then
+            echo "ERROR: Ambiguous candidate selection among: ${CANDIDATES[*]}"
+            exit 1
+          fi
+
+          # Verify that selected APK exists, has .apk extension, and is non-empty
           if [ ! -f "$PRIMARY_APK" ]; then
-            echo "ERROR: Selected APK does not exist:"
-            echo "$PRIMARY_APK"
+            echo "ERROR: Selected APK does not exist: $PRIMARY_APK"
             exit 1
           fi
 
-          if [ ! -s "$PRIMARY_APK" ]; then
-            echo "ERROR: Selected APK is empty:"
-            echo "$PRIMARY_APK"
+          if [[ "$PRIMARY_APK" != *.apk ]]; then
+            echo "ERROR: Selected file does not have .apk extension: $PRIMARY_APK"
             exit 1
           fi
 
-          echo "Selected Release APK:"
-          echo "$PRIMARY_APK"
+          APK_BYTES="$(stat -c "%s" "$PRIMARY_APK")"
+          if [ "$APK_BYTES" -le 0 ]; then
+            echo "ERROR: Selected APK is empty (0 bytes): $PRIMARY_APK"
+            exit 1
+          fi
 
-          ls -lh "$PRIMARY_APK"
+          echo "Validating APK integrity with unzip..."
+          unzip -t "$PRIMARY_APK" >/dev/null 2>&1 || {
+            echo "ERROR: Selected APK failed ZIP archive validation (unzip -t)!"
+            exit 1
+          }
+
+          APK_RAW_SHA256="$(sha256sum "$PRIMARY_APK" | awk '{print $1}')"
+
+          echo "========================================"
+          echo "APK source:      $PRIMARY_APK"
+          echo "APK size:        $APK_BYTES"
+          echo "APK SHA256:      $APK_RAW_SHA256"
+          echo "APK integrity:   PASS"
+          echo "========================================"
 
           ASSET_NAME="Equilizer-${RELEASE_TAG}.apk"
           CHECKSUM_NAME="${ASSET_NAME}.sha256"
 
+          # Copy without modifying contents
           cp "$PRIMARY_APK" "$ASSET_NAME"
 
           if [ ! -s "$ASSET_NAME" ]; then
-            echo "ERROR: Packaged APK is empty."
+            echo "ERROR: Packaged asset '$ASSET_NAME' is empty."
             exit 1
           fi
 
-          sha256sum "$ASSET_NAME" | tee "$CHECKSUM_NAME"
+          # Validate copied asset integrity
+          unzip -t "$ASSET_NAME" >/dev/null 2>&1 || {
+            echo "ERROR: Copied asset '$ASSET_NAME' failed ZIP validation!"
+            exit 1
+          }
 
+          sha256sum "$ASSET_NAME" > "$CHECKSUM_NAME"
           SHA256_HASH="$(awk '{print $1}' "$CHECKSUM_NAME")"
+
+          if [ "$SHA256_HASH" != "$APK_RAW_SHA256" ]; then
+            echo "ERROR: Copied asset checksum mismatch!"
+            exit 1
+          fi
+
+          echo "========================================"
+          echo "Release Assets Prepared:"
+          echo " - APK:      $ASSET_NAME ($APK_BYTES bytes)"
+          echo " - Checksum: $CHECKSUM_NAME ($(cat "$CHECKSUM_NAME"))"
+          echo "========================================"
 
           echo "APK_ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
           echo "CHECKSUM_ASSET_NAME=$CHECKSUM_NAME" >> "$GITHUB_ENV"
           echo "RELEASE_SHA256=$SHA256_HASH" >> "$GITHUB_ENV"
-
-          echo "========================================"
-          echo "Release APK prepared successfully"
-          echo "APK: $ASSET_NAME"
-          echo "Size: $(ls -lh "$ASSET_NAME" | awk '{print $5}')"
-          echo "SHA256: $SHA256_HASH"
-          echo "========================================"
 
       - name: Upload Release Actions Artifact
         uses: actions/upload-artifact@v4
@@ -380,6 +438,7 @@ jobs:
           fi
 
           echo "RELEASE_HTML_URL=$RELEASE_HTML_URL" >> "$GITHUB_ENV"
+          echo "RELEASE_URL=$RELEASE_HTML_URL" >> "$GITHUB_ENV"
           echo "REMOTE_APK_ASSET_ID=$APK_ASSET_ID" >> "$GITHUB_ENV"
           echo "REMOTE_APK_URL=$APK_DOWNLOAD_URL" >> "$GITHUB_ENV"
           echo "REMOTE_APK_SIZE=$APK_ASSET_SIZE" >> "$GITHUB_ENV"
