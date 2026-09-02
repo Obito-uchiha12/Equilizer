@@ -42,12 +42,37 @@ jobs:
         run: |
           echo "=== Release Environment Diagnostics ==="
           echo "Current Working Directory: $(pwd)"
+          echo "Event Name: ${{ github.event_name }}"
           echo "Git Ref: ${{ github.ref }}"
           echo "Git Ref Name: ${{ github.ref_name }}"
-          ls -la
           chmod +x ./gradlew
           test -f ./gradlew
           ./gradlew --version
+
+      - name: Determine and Validate Release Tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag_name }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
+          # Trim whitespace
+          TAG=$(echo "$TAG" | xargs)
+
+          if [ -z "$TAG" ]; then
+            echo "ERROR: Release tag cannot be empty."
+            exit 1
+          fi
+
+          # Validate that tag starts with 'v' and follows semantic versioning
+          if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9\.\+]+)?$ ]]; then
+            echo "ERROR: Invalid release tag '$TAG'. Must start with 'v' and follow semantic versioning (e.g., v1.0.0, v1.0.1-beta.1)."
+            exit 1
+          fi
+
+          echo "Validated Release Tag: $TAG"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Restore Keystore from Secrets (If Configured)
         env:
@@ -73,38 +98,52 @@ jobs:
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Locate, Verify, and Package Release Artifacts
+      - name: Locate, Verify, and Package Release Binary
         id: package_release
         run: |
-          TAG="${{ github.ref_name }}"
-          if [ -z "$TAG" ] || [ "$TAG" = "main" ]; then
-            TAG="${{ github.event.inputs.tag_name || 'v1.0.0' }}"
-          fi
-          echo "Target Release Tag: $TAG"
-          
-          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" -type f | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find . -path "*/build/outputs/apk/*" -name "*release*.apk" -type f | head -n 1)
-          fi
-          if [ -z "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
-            echo "Error: Release APK not found or empty!"
+          set -euo pipefail
+
+          echo "Locating Release APK in app/build/outputs/apk/release/..."
+          APK_FILES=()
+          while IFS= read -r file; do
+            APK_FILES+=("$file")
+          done < <(find app/build/outputs/apk/release -maxdepth 2 -type f -name "*.apk" | sort)
+
+          if [ ${#APK_FILES[@]} -eq 0 ]; then
+            echo "ERROR: No release APK found in app/build/outputs/apk/release/"
             exit 1
           fi
-          echo "Found generated Release APK at: $APK_PATH"
-          ls -lh "$APK_PATH"
-          
-          RELEASE_APK="Equilizer-${TAG}.apk"
-          cp "$APK_PATH" "$RELEASE_APK"
-          
-          # Generate SHA-256 Checksum file
-          sha256sum "$RELEASE_APK" > "${RELEASE_APK}.sha256"
-          SHA256=$(awk '{print $1}' "${RELEASE_APK}.sha256")
-          
-          echo "RELEASE_APK=$RELEASE_APK" >> $GITHUB_ENV
-          echo "SHA256_FILE=${RELEASE_APK}.sha256" >> $GITHUB_ENV
-          echo "SHA256=$SHA256" >> $GITHUB_ENV
-          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
-          echo "Generated APK: $RELEASE_APK (SHA-256: $SHA256)"
+
+          # Prioritize app-release.apk if signed, otherwise use the first discovered release APK
+          PRIMARY_APK=""
+          for apk in "${APK_FILES[@]}"; do
+            if [[ "$(basename "$apk")" == "app-release.apk" ]]; then
+              PRIMARY_APK="$apk"
+              break
+            fi
+          done
+          if [ -z "$PRIMARY_APK" ]; then
+            PRIMARY_APK="${APK_FILES[0]}"
+          fi
+
+          if [ ! -s "$PRIMARY_APK" ]; then
+            echo "ERROR: Release APK '$PRIMARY_APK' is empty (0 bytes)!"
+            exit 1
+          fi
+
+          echo "Found Release APK: $PRIMARY_APK ($(ls -lh "$PRIMARY_APK" | awk '{print $5}'))"
+
+          ASSET_NAME="Equilizer-${RELEASE_TAG}.apk"
+          cp "$PRIMARY_APK" "$ASSET_NAME"
+
+          # Generate SHA-256 Checksum
+          sha256sum "$ASSET_NAME" | tee "${ASSET_NAME}.sha256"
+          SHA256_HASH=$(awk '{print $1}' "${ASSET_NAME}.sha256")
+
+          echo "APK_ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+          echo "CHECKSUM_ASSET_NAME=${ASSET_NAME}.sha256" >> "$GITHUB_ENV"
+          echo "RELEASE_SHA256=$SHA256_HASH" >> "$GITHUB_ENV"
+          echo "Release asset prepared: $ASSET_NAME (SHA-256: $SHA256_HASH)"
 
       - name: Secure Cleanup of Temporary Signing Files
         if: always()
@@ -113,35 +152,76 @@ jobs:
             shred -u app/release.keystore || rm -f app/release.keystore
           fi
 
-      - name: Create GitHub Release and Upload Assets
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+      - name: Upload Release Actions Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: Equilizer ${{ env.RELEASE_TAG }}
-          tag_name: ${{ env.RELEASE_TAG }}
-          draft: false
-          prerelease: false
-          files: |
-            ${{ env.RELEASE_APK }}
-            ${{ env.SHA256_FILE }}
-          body: |
-            ## Equilizer Production Release (${{ env.RELEASE_TAG }})
-            
-            A high-precision, privacy-focused audio equalizer application for Android.
+          name: Equilizer-Release-${{ env.RELEASE_TAG }}
+          path: |
+            ${{ env.APK_ASSET_NAME }}
+            ${{ env.CHECKSUM_ASSET_NAME }}
+          if-no-files-found: error
+          retention-days: 30
 
-            ### 🎧 Highlights
-            * **Real 5-Band Equalizer**: Native Android AudioEffect processing with bi-quadratic peaking filters (60 Hz, 230 Hz, 910 Hz, 3.6 kHz, 14 kHz).
-            * **Headroom & Clipping Protection**: Automatic dynamic pre-gain attenuation and manual headroom modes.
-            * **Smart EQ Assistant**: Goal-oriented sound tailoring based on listening preferences and device acoustic profiles.
-            * **Per-Device Audio Routing**: Automatic profile persistence for Bluetooth headphones, wired earphones, USB audio, and phone speakers.
-            * **Instant A/B Mode & Calibration Tones**: Instant flat comparison and diagnostic sine/pink noise/sweep generator.
-            * **100% Offline & Private**: Zero internet, zero microphone, and zero telemetry permissions.
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
 
-            ### 📋 Package & Verification
-            * **Application ID**: `com.aistudio.equalizer.fxarch`
-            * **Target SDK**: `36` (Android 16) | **Min SDK**: `24` (Android 7.0+)
-            * **Release Binary**: `${{ env.RELEASE_APK }}`
-            * **SHA-256 Checksum**: `${{ env.SHA256 }}`
+          echo "Publishing release '${RELEASE_TAG}' to GitHub Releases..."
 
-            ### ⚠️ Known Platform Notes
-            * Actual hardware effect support is managed by the device's audio HAL. OEM systems (e.g. Samsung SoundAlive, Xiaomi Dirac) may enforce device-specific audio routing policies.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release '$RELEASE_TAG' already exists. Uploading/updating release assets with --clobber..."
+            gh release upload "$RELEASE_TAG" "$APK_ASSET_NAME" "$CHECKSUM_ASSET_NAME" --clobber
+          else
+            echo "Release '$RELEASE_TAG' does not exist. Creating new GitHub Release with commit target $GITHUB_SHA..."
+            gh release create "$RELEASE_TAG" \
+              "$APK_ASSET_NAME" \
+              "$CHECKSUM_ASSET_NAME" \
+              --title "Equilizer $RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --generate-notes \
+              --latest
+          fi
+
+      - name: Verify GitHub Release Asset Attachment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          echo "Verifying attached assets on GitHub Release '$RELEASE_TAG'..."
+
+          RELEASE_JSON=$(gh release view "$RELEASE_TAG" --json tagName,isDraft,isPrerelease,assets,url)
+          echo "Release Metadata: $RELEASE_JSON"
+
+          ASSET_NAMES=$(echo "$RELEASE_JSON" | jq -r '.assets[].name')
+          echo "Discovered Release Assets:"
+          echo "$ASSET_NAMES"
+
+          if ! echo "$ASSET_NAMES" | grep -Fxq "$APK_ASSET_NAME"; then
+            echo "ERROR: Required APK asset '$APK_ASSET_NAME' is NOT attached to release '$RELEASE_TAG'!"
+            exit 1
+          fi
+
+          if ! echo "$ASSET_NAMES" | grep -Fxq "$CHECKSUM_ASSET_NAME"; then
+            echo "ERROR: Required checksum asset '$CHECKSUM_ASSET_NAME' is NOT attached to release '$RELEASE_TAG'!"
+            exit 1
+          fi
+
+          RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.url')
+          echo "RELEASE_URL=$RELEASE_URL" >> "$GITHUB_ENV"
+          echo "Release asset verification successful!"
+
+      - name: Print Release Summary
+        run: |
+          echo "=================================================="
+          echo "🎉 GitHub Release Published & Verified Successfully"
+          echo "=================================================="
+          echo "Release Tag:     ${{ env.RELEASE_TAG }}"
+          echo "APK Asset:       ${{ env.APK_ASSET_NAME }}"
+          echo "APK Size:        $(ls -lh "${{ env.APK_ASSET_NAME }}" | awk '{print $5}')"
+          echo "SHA256:          ${{ env.RELEASE_SHA256 }}"
+          echo "Release URL:     ${{ env.RELEASE_URL }}"
+          echo "=================================================="
+
