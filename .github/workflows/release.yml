@@ -252,80 +252,157 @@ jobs:
         run: |
           set -euo pipefail
 
+          TARGET_REPO="${GITHUB_REPOSITORY:-Obito-uchiha12/Equilizer}"
+          echo "Target Repository: $TARGET_REPO"
           echo "Publishing GitHub Release: $RELEASE_TAG"
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-
-            echo "Release already exists."
-            echo "Uploading/replacing release assets..."
-
-            gh release upload \
-              "$RELEASE_TAG" \
-              "$APK_ASSET_NAME" \
-              "$CHECKSUM_ASSET_NAME" \
-              --clobber
-
+          # 1. Check if release exists or create it
+          if gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "Release '$RELEASE_TAG' already exists on $TARGET_REPO."
+            RELEASE_JSON="$(gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" --json id,tagName,url,assets)"
           else
-
-            echo "Release does not exist."
-            echo "Creating release for commit: $GITHUB_SHA"
-
-            gh release create \
-              "$RELEASE_TAG" \
-              "$APK_ASSET_NAME" \
-              "$CHECKSUM_ASSET_NAME" \
+            echo "Release '$RELEASE_TAG' does not exist on $TARGET_REPO. Creating new release targeting $GITHUB_SHA..."
+            gh release create "$RELEASE_TAG" \
+              --repo "$TARGET_REPO" \
               --title "Equilizer $RELEASE_TAG" \
               --target "$GITHUB_SHA" \
               --generate-notes \
               --latest
-
+            RELEASE_JSON="$(gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" --json id,tagName,url,assets)"
           fi
 
-      - name: Verify GitHub Release Assets
+          RELEASE_ID="$(echo "$RELEASE_JSON" | jq -r '.id')"
+          echo "Release ID: $RELEASE_ID"
+          echo "RELEASE_ID=$RELEASE_ID" >> "$GITHUB_ENV"
+          echo "TARGET_REPO=$TARGET_REPO" >> "$GITHUB_ENV"
+
+          # 2. Upload APK and SHA256 checksum with --clobber
+          echo "Uploading assets ($APK_ASSET_NAME, $CHECKSUM_ASSET_NAME) to release '$RELEASE_TAG' on $TARGET_REPO..."
+          gh release upload "$RELEASE_TAG" \
+            "$APK_ASSET_NAME" \
+            "$CHECKSUM_ASSET_NAME" \
+            --repo "$TARGET_REPO" \
+            --clobber
+
+      - name: Query Remote Release Assets and Verify Download
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Verifying GitHub Release..."
+          TARGET_REPO="${TARGET_REPO:-${GITHUB_REPOSITORY:-Obito-uchiha12/Equilizer}}"
+          echo "=== Fetching Remote Release State from GitHub REST API ==="
 
-          RELEASE_JSON="$(
-            gh release view "$RELEASE_TAG" \
-              --json tagName,isDraft,isPrerelease,assets,url
-          )"
+          # Query release asset metadata directly via GitHub API
+          RELEASE_INFO="$(gh api "repos/${TARGET_REPO}/releases/tags/${RELEASE_TAG}")"
+          RELEASE_ID="$(echo "$RELEASE_INFO" | jq -r '.id')"
+          RELEASE_HTML_URL="$(echo "$RELEASE_INFO" | jq -r '.html_url')"
 
-          echo "$RELEASE_JSON"
+          ASSETS_JSON="$(gh api "repos/${TARGET_REPO}/releases/${RELEASE_ID}/assets")"
+          echo "Remote Assets JSON:"
+          echo "$ASSETS_JSON" | jq -r '.[] | {id: .id, name: .name, size: .size, state: .state, browser_download_url: .browser_download_url}'
 
-          ASSET_NAMES="$(
-            echo "$RELEASE_JSON" |
-              jq -r '.assets[].name'
-          )"
-
-          echo "Release assets:"
-          echo "$ASSET_NAMES"
-
-          if ! echo "$ASSET_NAMES" | grep -Fxq "$APK_ASSET_NAME"; then
-            echo "ERROR: APK was NOT attached to the GitHub Release."
-            echo "Expected: $APK_ASSET_NAME"
+          # Verify APK Asset presence & metadata
+          APK_ASSET_DATA="$(echo "$ASSETS_JSON" | jq -r --arg name "$APK_ASSET_NAME" '.[] | select(.name == $name)')"
+          if [ -z "$APK_ASSET_DATA" ]; then
+            echo "ERROR: Remote APK asset '$APK_ASSET_NAME' was not found in release $RELEASE_TAG on $TARGET_REPO!"
             exit 1
           fi
 
-          if ! echo "$ASSET_NAMES" | grep -Fxq "$CHECKSUM_ASSET_NAME"; then
-            echo "ERROR: SHA256 checksum was NOT attached to the GitHub Release."
-            echo "Expected: $CHECKSUM_ASSET_NAME"
+          APK_ASSET_ID="$(echo "$APK_ASSET_DATA" | jq -r '.id')"
+          APK_ASSET_SIZE="$(echo "$APK_ASSET_DATA" | jq -r '.size')"
+          APK_ASSET_STATE="$(echo "$APK_ASSET_DATA" | jq -r '.state')"
+          APK_DOWNLOAD_URL="$(echo "$APK_ASSET_DATA" | jq -r '.browser_download_url')"
+
+          if [ "$APK_ASSET_STATE" != "uploaded" ]; then
+            echo "ERROR: Remote APK asset state is '$APK_ASSET_STATE', expected 'uploaded'!"
             exit 1
           fi
 
-          RELEASE_URL="$(echo "$RELEASE_JSON" | jq -r '.url')"
+          if [ "$APK_ASSET_SIZE" -le 0 ]; then
+            echo "ERROR: Remote APK asset size is $APK_ASSET_SIZE bytes (must be > 0)!"
+            exit 1
+          fi
 
-          echo "RELEASE_URL=$RELEASE_URL" >> "$GITHUB_ENV"
+          # Verify Checksum Asset presence & metadata
+          SHA256_ASSET_DATA="$(echo "$ASSETS_JSON" | jq -r --arg name "$CHECKSUM_ASSET_NAME" '.[] | select(.name == $name)')"
+          if [ -z "$SHA256_ASSET_DATA" ]; then
+            echo "ERROR: Remote checksum asset '$CHECKSUM_ASSET_NAME' was not found in release $RELEASE_TAG!"
+            exit 1
+          fi
+
+          SHA256_ASSET_ID="$(echo "$SHA256_ASSET_DATA" | jq -r '.id')"
+          SHA256_DOWNLOAD_URL="$(echo "$SHA256_ASSET_DATA" | jq -r '.browser_download_url')"
+
+          echo "APK Asset ID: $APK_ASSET_ID ($APK_ASSET_SIZE bytes)"
+          echo "APK Download URL: $APK_DOWNLOAD_URL"
+          echo "SHA256 Asset ID: $SHA256_ASSET_ID"
+          echo "SHA256 Download URL: $SHA256_DOWNLOAD_URL"
+
+          # Remote Download & Integrity Verification
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "$VERIFY_DIR"' EXIT
+
+          DOWNLOADED_APK="${VERIFY_DIR}/${APK_ASSET_NAME}"
+          DOWNLOADED_SHA256="${VERIFY_DIR}/${CHECKSUM_ASSET_NAME}"
+
+          echo "Downloading remote APK from: $APK_DOWNLOAD_URL"
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" "$APK_DOWNLOAD_URL" -o "$DOWNLOADED_APK"
+
+          if [ ! -s "$DOWNLOADED_APK" ]; then
+            echo "ERROR: Downloaded remote APK is empty or failed to download."
+            exit 1
+          fi
+
+          echo "Validating downloaded APK structure with unzip..."
+          unzip -t "$DOWNLOADED_APK" >/dev/null 2>&1 || {
+            echo "ERROR: Downloaded remote APK failed ZIP archive validation!"
+            exit 1
+          }
+
+          DOWNLOADED_HASH="$(sha256sum "$DOWNLOADED_APK" | awk '{print $1}')"
+          echo "Local SHA256:             $RELEASE_SHA256"
+          echo "Downloaded Remote SHA256: $DOWNLOADED_HASH"
+
+          if [ "$RELEASE_SHA256" != "$DOWNLOADED_HASH" ]; then
+            echo "ERROR: SHA256 mismatch between local build ($RELEASE_SHA256) and remote download ($DOWNLOADED_HASH)!"
+            exit 1
+          fi
+
+          echo "Downloading remote SHA256 checksum file..."
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" "$SHA256_DOWNLOAD_URL" -o "$DOWNLOADED_SHA256"
+
+          DOWNLOADED_CHECKSUM_CONTENT="$(cat "$DOWNLOADED_SHA256" | awk '{print $1}')"
+          if [ "$DOWNLOADED_CHECKSUM_CONTENT" != "$RELEASE_SHA256" ]; then
+            echo "ERROR: Remote SHA256 file content ($DOWNLOADED_CHECKSUM_CONTENT) does not match expected ($RELEASE_SHA256)!"
+            exit 1
+          fi
+
+          echo "RELEASE_HTML_URL=$RELEASE_HTML_URL" >> "$GITHUB_ENV"
+          echo "REMOTE_APK_ASSET_ID=$APK_ASSET_ID" >> "$GITHUB_ENV"
+          echo "REMOTE_APK_URL=$APK_DOWNLOAD_URL" >> "$GITHUB_ENV"
+          echo "REMOTE_APK_SIZE=$APK_ASSET_SIZE" >> "$GITHUB_ENV"
 
           echo "========================================"
-          echo "GitHub Release Asset Verification PASS"
-          echo "Release: $RELEASE_URL"
-          echo "APK: $APK_ASSET_NAME"
-          echo "Checksum: $CHECKSUM_ASSET_NAME"
+          echo "GITHUB RELEASE VERIFICATION"
+          echo "========================================"
+          echo "Repository:             $TARGET_REPO"
+          echo "Release:                $RELEASE_TAG"
+          echo "Release ID:             $RELEASE_ID"
+          echo "Remote APK:             $APK_ASSET_NAME"
+          echo "Remote APK Asset ID:    $APK_ASSET_ID"
+          echo "Remote APK Size:        $APK_ASSET_SIZE bytes"
+          echo "Remote APK URL:         $APK_DOWNLOAD_URL"
+          echo "Remote SHA256:          $CHECKSUM_ASSET_NAME"
+          echo "Local SHA256:           $RELEASE_SHA256"
+          echo "Downloaded Remote SHA256: $DOWNLOADED_HASH"
+          echo "APK ASSET PRESENT:      true"
+          echo "APK DOWNLOAD TEST:      PASS"
+          echo "APK HASH MATCH:         PASS"
+          echo "SHA256 ASSET PRESENT:   true"
+          echo "SHA256 CONTENT MATCH:   PASS"
+          echo "FINAL RELEASE VERIFICATION: PASS"
           echo "========================================"
 
       - name: Secure Cleanup of Temporary Signing Files
