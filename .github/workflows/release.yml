@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release Tag Name (e.g. v1.0.0)'
+        description: 'Release Tag Name (e.g. v1.0.1)'
         required: true
-        default: 'v1.0.0'
+        default: 'v1.0.1'
         type: string
 
 concurrency:
@@ -258,8 +258,8 @@ jobs:
           echo "APK integrity:   PASS"
           echo "========================================"
 
-          ASSET_NAME="Equilizer-${RELEASE_TAG}.apk"
-          CHECKSUM_NAME="${ASSET_NAME}.sha256"
+          ASSET_NAME="app-release.apk"
+          CHECKSUM_NAME="app-release.apk.sha256"
 
           # Copy without modifying contents
           cp "$PRIMARY_APK" "$ASSET_NAME"
@@ -322,7 +322,7 @@ jobs:
             echo "Release '$RELEASE_TAG' does not exist on $TARGET_REPO. Creating new release targeting $GITHUB_SHA..."
             gh release create "$RELEASE_TAG" \
               --repo "$TARGET_REPO" \
-              --title "Equilizer $RELEASE_TAG" \
+              --title "Equalizer $RELEASE_TAG" \
               --target "$GITHUB_SHA" \
               --generate-notes \
               --latest
